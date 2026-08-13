@@ -1,0 +1,457 @@
+name: RDP_Cua_Kenyuko_Dep_Trai
+
+on:
+  workflow_dispatch:
+
+# Chỉ cho phép 1 workflow thuộc nhóm này hoạt động tại một thời điểm.
+concurrency:
+  group: kenyuko-rdp
+  cancel-in-progress: false
+
+jobs:
+  secure-rdp:
+    runs-on: windows-latest
+
+    # Giới hạn tối đa của job.
+    # 61 phút để bộ đếm 60 phút tự kết thúc trước timeout GitHub.
+    timeout-minutes: 61
+
+    steps:
+
+      # ==========================================================
+      # 0. BẮT ĐẦU TÍNH GIỜ
+      # ==========================================================
+      - name: 0. Bắt đầu tính thời gian VPS
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          # Ghi thời điểm job bắt đầu
+          $startTime = (Get-Date).ToUniversalTime()
+
+          "VPS_START_TIME=$($startTime.ToString('o'))" |
+            Out-File `
+              -FilePath $env:GITHUB_ENV `
+              -Append `
+              -Encoding utf8
+
+          $endTime = $startTime.AddMinutes(60)
+
+          Write-Host ""
+          Write-Host "==================================================" -ForegroundColor Green
+          Write-Host "           VPS TIMER ĐÃ BẮT ĐẦU" -ForegroundColor Green
+          Write-Host "==================================================" -ForegroundColor Green
+          Write-Host "Bắt đầu : $($startTime.ToLocalTime().ToString('HH:mm:ss'))"
+          Write-Host "Hết hạn : $($endTime.ToLocalTime().ToString('HH:mm:ss'))"
+          Write-Host "Thời gian: 60 phút"
+          Write-Host "==================================================" -ForegroundColor Green
+          Write-Host ""
+
+
+      # ==========================================================
+      # 1. CẤU HÌNH RDP + FIREWALL
+      # ==========================================================
+      - name: 1. Cấu hình Hệ thống & Tường lửa
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "--- Kenyuko đẹp trai đang thiết lập hệ thống ---" -ForegroundColor Magenta
+
+          # Bật RDP
+          Set-ItemProperty `
+            -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+            -Name "fDenyTSConnections" `
+            -Value 0 `
+            -Force
+
+          # Giữ nguyên cấu hình source cũ
+          Set-ItemProperty `
+            -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name "UserAuthentication" `
+            -Value 0 `
+            -Force
+
+          Set-ItemProperty `
+            -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name "SecurityLayer" `
+            -Value 0 `
+            -Force
+
+          # Xóa firewall rule cũ
+          netsh advfirewall firewall delete rule `
+            name="RDP-Tailscale" `
+            > $null 2>&1
+
+          # Mở port RDP
+          netsh advfirewall firewall add rule `
+            name="RDP-Tailscale" `
+            dir=in `
+            action=allow `
+            protocol=TCP `
+            localport=3389
+
+          # Khởi động RDP
+          Restart-Service `
+            -Name TermService `
+            -Force
+
+          # Kiểm tra dịch vụ
+          $rdpService = Get-Service -Name TermService
+
+          if ($rdpService.Status -ne "Running") {
+            throw "TermService chưa chạy."
+          }
+
+          Write-Host "[XONG] RDP và Firewall đã sẵn sàng." -ForegroundColor Green
+
+
+      # ==========================================================
+      # 2. TẠO USER + PASSWORD
+      # ==========================================================
+      - name: 2. Tạo Mật khẩu Ngẫu nhiên & User Kenyuko
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "--- Đang tạo mật khẩu ngẫu nhiên ---" -ForegroundColor Cyan
+
+          $upper = [char[]](65..90)
+          $lower = [char[]](97..122)
+          $number = [char[]](48..57)
+          $special = [char[]]"!@#$%_-+="
+
+          $rawPassword = @()
+
+          $rawPassword += $upper | Get-Random -Count 4
+          $rawPassword += $lower | Get-Random -Count 4
+          $rawPassword += $number | Get-Random -Count 4
+          $rawPassword += $special | Get-Random -Count 4
+
+          # Trộn password
+          $password = -join (
+            $rawPassword |
+            Sort-Object { Get-Random }
+          )
+
+          $securePass = ConvertTo-SecureString `
+            -String $password `
+            -AsPlainText `
+            -Force
+
+          # Xóa user cũ nếu tồn tại
+          $oldUser = Get-LocalUser `
+            -Name "Kenyuko" `
+            -ErrorAction SilentlyContinue
+
+          if ($oldUser) {
+            Remove-LocalUser `
+              -Name "Kenyuko" `
+              -ErrorAction Stop
+          }
+
+          # Tạo user mới
+          New-LocalUser `
+            -Name "Kenyuko" `
+            -Password $securePass `
+            -AccountNeverExpires `
+            -Description "RDP cua Kenyuko" |
+            Out-Null
+
+          # Thêm Administrators
+          Add-LocalGroupMember `
+            -Group "Administrators" `
+            -Member "Kenyuko"
+
+          # Thêm Remote Desktop Users
+          Add-LocalGroupMember `
+            -Group "Remote Desktop Users" `
+            -Member "Kenyuko"
+
+          # Lưu password cho các step sau
+          "RDP_PASS=$password" |
+            Out-File `
+              -FilePath $env:GITHUB_ENV `
+              -Append `
+              -Encoding utf8
+
+          Write-Host "[THÀNH CÔNG] Đã tạo user Kenyuko." -ForegroundColor Green
+
+
+      # ==========================================================
+      # 3. CÀI TAILSCALE
+      # ==========================================================
+      - name: 3. Cài đặt Tailscale
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "--- Đang tải và cài đặt Tailscale ---" -ForegroundColor Cyan
+
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+
+          $msiPath = Join-Path `
+            $env:TEMP `
+            "tailscale.msi"
+
+          Invoke-WebRequest `
+            -Uri $tsUrl `
+            -OutFile $msiPath
+
+          if (-not (Test-Path $msiPath)) {
+            throw "Không tải được Tailscale MSI."
+          }
+
+          $installer = Start-Process `
+            -FilePath "msiexec.exe" `
+            -ArgumentList "/i `"$msiPath`" /quiet /norestart" `
+            -Wait `
+            -PassThru
+
+          if ($installer.ExitCode -ne 0) {
+            throw "Cài Tailscale thất bại. ExitCode: $($installer.ExitCode)"
+          }
+
+          $tsExe = Join-Path `
+            $env:ProgramFiles `
+            "Tailscale\tailscale.exe"
+
+          if (-not (Test-Path $tsExe)) {
+            throw "Không tìm thấy tailscale.exe sau khi cài."
+          }
+
+          Write-Host "[XONG] Tailscale đã được cài đặt." -ForegroundColor Green
+
+
+      # ==========================================================
+      # 4. KẾT NỐI TAILSCALE
+      # ==========================================================
+      - name: 4. Kết nối RDP-của-Kenyuko
+        shell: pwsh
+        env:
+          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "--- Đang kết nối Tailscale ---" -ForegroundColor Cyan
+
+          $ts = Join-Path `
+            $env:ProgramFiles `
+            "Tailscale\tailscale.exe"
+
+          # Kiểm tra secret
+          if ([string]::IsNullOrWhiteSpace($env:TAILSCALE_AUTH_KEY)) {
+            throw "Secret TAILSCALE_AUTH_KEY chưa được cấu hình."
+          }
+
+          # Kết nối Tailscale
+          & $ts up `
+            --authkey="$env:TAILSCALE_AUTH_KEY" `
+            --hostname="RDP-cua-Kenyuko"
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "tailscale up thất bại."
+          }
+
+          # Chờ IP
+          $tsIP = $null
+
+          for ($i = 1; $i -le 30; $i++) {
+
+            try {
+              $result = & $ts ip -4 2>$null
+
+              if ($result) {
+
+                $candidate = (
+                  $result |
+                  Select-Object -First 1
+                ).ToString().Trim()
+
+                if ($candidate -match '^\d{1,3}(\.\d{1,3}){3}$') {
+                  $tsIP = $candidate
+                  break
+                }
+              }
+            }
+            catch {
+              # Tiếp tục chờ
+            }
+
+            Write-Host "Đang chờ IP Tailscale... $i/30"
+
+            Start-Sleep -Seconds 5
+          }
+
+          if (-not $tsIP) {
+            throw "Không lấy được IP Tailscale sau 150 giây."
+          }
+
+          # Lưu IP
+          "TS_IP=$tsIP" |
+            Out-File `
+              -FilePath $env:GITHUB_ENV `
+              -Append `
+              -Encoding utf8
+
+          Write-Host "[XONG] IP nội bộ: $tsIP" -ForegroundColor Green
+
+
+      # ==========================================================
+      # 5. DUY TRÌ RDP + BỘ ĐẾM MỖI 1 GIÂY
+      # ==========================================================
+      - name: 5. Duy trì Kết nối - Tự động tắt sau 1 giờ
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Continue"
+
+          Write-Host ""
+          Write-Host "==================================================" -ForegroundColor Yellow
+          Write-Host "       THÔNG TIN RDP CỦA KENYUKO" -ForegroundColor Yellow
+          Write-Host "==================================================" -ForegroundColor Yellow
+          Write-Host " Địa chỉ IP : $env:TS_IP" -ForegroundColor White
+          Write-Host " Tài khoản  : Kenyuko" -ForegroundColor White
+          Write-Host " Mật khẩu   : $env:RDP_PASS" -ForegroundColor White
+          Write-Host "==================================================" -ForegroundColor Yellow
+          Write-Host ""
+
+          # ------------------------------------------------------
+          # LẤY THỜI ĐIỂM JOB BẮT ĐẦU
+          # ------------------------------------------------------
+
+          if ([string]::IsNullOrWhiteSpace($env:VPS_START_TIME)) {
+            throw "Không tìm thấy VPS_START_TIME."
+          }
+
+          try {
+            $startTime = [DateTime]::Parse(
+              $env:VPS_START_TIME
+            ).ToUniversalTime()
+          }
+          catch {
+            throw "VPS_START_TIME không hợp lệ."
+          }
+
+          # Hết hạn đúng 60 phút từ lúc job bắt đầu
+          $endTime = $startTime.AddMinutes(60)
+
+          $localStart = $startTime.ToLocalTime()
+          $localEnd = $endTime.ToLocalTime()
+
+          Write-Host "VPS bắt đầu : $($localStart.ToString('HH:mm:ss'))" -ForegroundColor Cyan
+          Write-Host "VPS kết thúc: $($localEnd.ToString('HH:mm:ss'))" -ForegroundColor Red
+          Write-Host ""
+
+          # ------------------------------------------------------
+          # BỘ ĐẾM MỖI 1 GIÂY
+          # ------------------------------------------------------
+
+          while ($true) {
+
+            # Thời gian hiện tại
+            $now = (Get-Date).ToUniversalTime()
+
+            # Thời gian còn lại
+            $remaining = $endTime - $now
+
+            # Hết giờ
+            if ($remaining.TotalSeconds -le 0) {
+              break
+            }
+
+            # Tổng số giây còn lại
+            $totalSeconds = [math]::Ceiling(
+              $remaining.TotalSeconds
+            )
+
+            # Tách phút / giây
+            $minutes = [math]::Floor(
+              $totalSeconds / 60
+            )
+
+            $seconds = $totalSeconds % 60
+
+            # Hiển thị dạng 59:59
+            $countdown = "{0:00}:{1:00}" -f $minutes, $seconds
+
+            Write-Host `
+              "[$(Get-Date -Format 'HH:mm:ss')] VPS đang chạy - Còn $countdown" `
+              -ForegroundColor Cyan
+
+            # ----------------------------------------------------
+            # KIỂM TRA TAILSCALE
+            # ----------------------------------------------------
+            #
+            # Đã sửa: không gọi tailscale.exe liên tục trong
+            # vòng lặp vì process con có thể làm Cancel chậm.
+            # ----------------------------------------------------
+
+            try {
+
+              $ts = Join-Path `
+                $env:ProgramFiles `
+                "Tailscale\tailscale.exe"
+
+              if (-not (Test-Path $ts)) {
+
+                Write-Host `
+                  "Cảnh báo: Không tìm thấy tailscale.exe." `
+                  -ForegroundColor Yellow
+              }
+
+            }
+            catch {
+
+              Write-Host `
+                "Không thể kiểm tra Tailscale." `
+                -ForegroundColor Yellow
+            }
+
+            # ----------------------------------------------------
+            # CẬP NHẬT SAU 1 GIÂY
+            # ----------------------------------------------------
+
+            # Không ngủ quá thời gian còn lại
+            $sleepMilliseconds = [math]::Min(
+              1000,
+              [math]::Max(
+                100,
+                [int]$remaining.TotalMilliseconds
+              )
+            )
+
+            Start-Sleep `
+              -Milliseconds $sleepMilliseconds
+          }
+
+          # ======================================================
+          # HẾT 60 PHÚT
+          # ======================================================
+
+          Write-Host ""
+          Write-Host "==================================================" -ForegroundColor Red
+          Write-Host "              ĐÃ HẾT 60 PHÚT" -ForegroundColor Red
+          Write-Host "           ĐANG KẾT THÚC WORKFLOW" -ForegroundColor Red
+          Write-Host "==================================================" -ForegroundColor Red
+          Write-Host ""
+
+          # Ngắt Tailscale
+          try {
+
+            $ts = Join-Path `
+              $env:ProgramFiles `
+              "Tailscale\tailscale.exe"
+
+            if (Test-Path $ts) {
+              & $ts down 2>$null
+            }
+
+          }
+          catch {
+
+            Write-Host `
+              "Không thể ngắt Tailscale, tiếp tục kết thúc." `
+              -ForegroundColor Yellow
+          }
+
+          exit 0
