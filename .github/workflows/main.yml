@@ -13,8 +13,8 @@ jobs:
     runs-on: windows-latest
 
     # Giới hạn tối đa của job.
-    # 61 phút để bộ đếm 60 phút tự kết thúc trước timeout GitHub.
-    timeout-minutes: 61
+    # 91 phút để bộ đếm 90 phút tự kết thúc trước timeout GitHub.
+    timeout-minutes: 91
 
     steps:
 
@@ -299,7 +299,7 @@ jobs:
       # ==========================================================
       # 5. DUY TRÌ RDP + BỘ ĐẾM MỖI 1 GIÂY
       # ==========================================================
-      - name: 5. Duy trì Kết nối - Tự động tắt sau 1 giờ
+      - name: 5. Duy trì Kết nối - Tự động tắt sau 90 phút
         shell: pwsh
         run: |
           $ErrorActionPreference = "Continue"
@@ -331,8 +331,8 @@ jobs:
             throw "VPS_START_TIME không hợp lệ."
           }
 
-          # Hết hạn đúng 60 phút từ lúc job bắt đầu
-          $endTime = $startTime.AddMinutes(60)
+          # Hết hạn đúng 90 phút từ lúc job bắt đầu
+          $endTime = $startTime.AddMinutes(90)
 
           $localStart = $startTime.ToLocalTime()
           $localEnd = $endTime.ToLocalTime()
@@ -454,3 +454,4 @@ jobs:
           }
 
           exit 0
+          
