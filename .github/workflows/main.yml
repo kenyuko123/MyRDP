@@ -6,7 +6,7 @@ on:
 # Chỉ cho phép 1 workflow thuộc nhóm này hoạt động tại một thời điểm.
 concurrency:
   group: kenyuko-rdp
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   secure-rdp:
@@ -35,7 +35,7 @@ jobs:
               -Append `
               -Encoding utf8
 
-          $endTime = $startTime.AddMinutes(60)
+          $endTime = $startTime.AddMinutes(90)
 
           Write-Host ""
           Write-Host "==================================================" -ForegroundColor Green
@@ -43,7 +43,7 @@ jobs:
           Write-Host "==================================================" -ForegroundColor Green
           Write-Host "Bắt đầu : $($startTime.ToLocalTime().ToString('HH:mm:ss'))"
           Write-Host "Hết hạn : $($endTime.ToLocalTime().ToString('HH:mm:ss'))"
-          Write-Host "Thời gian: 60 phút"
+          Write-Host "Thời gian: 90 phút"
           Write-Host "==================================================" -ForegroundColor Green
           Write-Host ""
 
@@ -65,7 +65,6 @@ jobs:
             -Value 0 `
             -Force
 
-          # Giữ nguyên cấu hình source cũ
           Set-ItemProperty `
             -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
             -Name "UserAuthentication" `
@@ -425,12 +424,12 @@ jobs:
           }
 
           # ======================================================
-          # HẾT 60 PHÚT
+          # HẾT 90 PHÚT
           # ======================================================
 
           Write-Host ""
           Write-Host "==================================================" -ForegroundColor Red
-          Write-Host "              ĐÃ HẾT 60 PHÚT" -ForegroundColor Red
+          Write-Host "              ĐÃ HẾT 90 PHÚT" -ForegroundColor Red
           Write-Host "           ĐANG KẾT THÚC WORKFLOW" -ForegroundColor Red
           Write-Host "==================================================" -ForegroundColor Red
           Write-Host ""
