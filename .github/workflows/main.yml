@@ -13,8 +13,8 @@ jobs:
     runs-on: windows-latest
 
     # Giới hạn tối đa của job.
-    # 91 phút để bộ đếm 90 phút tự kết thúc trước timeout GitHub.
-    timeout-minutes: 91
+    # 91 phút để bộ đếm 60 phút tự kết thúc trước timeout GitHub.
+    timeout-minutes: 60
 
     steps:
 
@@ -35,7 +35,7 @@ jobs:
               -Append `
               -Encoding utf8
 
-          $endTime = $startTime.AddMinutes(90)
+          $endTime = $startTime.AddMinutes(60)
 
           Write-Host ""
           Write-Host "==================================================" -ForegroundColor Green
@@ -43,7 +43,7 @@ jobs:
           Write-Host "==================================================" -ForegroundColor Green
           Write-Host "Bắt đầu : $($startTime.ToLocalTime().ToString('HH:mm:ss'))"
           Write-Host "Hết hạn : $($endTime.ToLocalTime().ToString('HH:mm:ss'))"
-          Write-Host "Thời gian: 90 phút"
+          Write-Host "Thời gian: 60 phút"
           Write-Host "==================================================" -ForegroundColor Green
           Write-Host ""
 
@@ -331,8 +331,8 @@ jobs:
             throw "VPS_START_TIME không hợp lệ."
           }
 
-          # Hết hạn đúng 90 phút từ lúc job bắt đầu
-          $endTime = $startTime.AddMinutes(90)
+          # Hết hạn đúng 60 phút từ lúc job bắt đầu
+          $endTime = $startTime.AddMinutes(60)
 
           $localStart = $startTime.ToLocalTime()
           $localEnd = $endTime.ToLocalTime()
@@ -424,12 +424,12 @@ jobs:
           }
 
           # ======================================================
-          # HẾT 90 PHÚT
+          # HẾT 60 PHÚT
           # ======================================================
 
           Write-Host ""
           Write-Host "==================================================" -ForegroundColor Red
-          Write-Host "              ĐÃ HẾT 90 PHÚT" -ForegroundColor Red
+          Write-Host "              ĐÃ HẾT 60 PHÚT" -ForegroundColor Red
           Write-Host "           ĐANG KẾT THÚC WORKFLOW" -ForegroundColor Red
           Write-Host "==================================================" -ForegroundColor Red
           Write-Host ""
