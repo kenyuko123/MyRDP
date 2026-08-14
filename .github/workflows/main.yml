@@ -308,9 +308,10 @@ jobs:
           Write-Host "==================================================" -ForegroundColor Yellow
           Write-Host "       THÔNG TIN RDP CỦA KENYUKO" -ForegroundColor Yellow
           Write-Host "==================================================" -ForegroundColor Yellow
-          Write-Host " Địa chỉ IP : $env:TS_IP" -ForegroundColor White
-          Write-Host " Tài khoản  : Kenyuko" -ForegroundColor White
-          Write-Host " Mật khẩu   : $env:RDP_PASS" -ForegroundColor White
+          Write-Host "IP       : $env:TS_IP" -ForegroundColor White
+          Write-Host "Username : Kenyuko" -ForegroundColor White
+          Write-Host "Password : $env:RDP_PASS" -ForegroundColor White
+          Write-Host "Port     : 3389" -ForegroundColor White
           Write-Host "==================================================" -ForegroundColor Yellow
           Write-Host ""
 
@@ -543,5 +544,3 @@ jobs:
           }
 
           exit 0
-
-          
