@@ -13,8 +13,8 @@ jobs:
     runs-on: windows-latest
 
     # Giới hạn tối đa của job.
-    # 91 phút để bộ đếm 60 phút tự kết thúc trước timeout GitHub.
-    timeout-minutes: 60
+    # 91 phút để bộ đếm 90 phút tự kết thúc trước timeout GitHub.
+    timeout-minutes: 91
 
     steps:
 
@@ -35,7 +35,7 @@ jobs:
               -Append `
               -Encoding utf8
 
-          $endTime = $startTime.AddMinutes(60)
+          $endTime = $startTime.AddMinutes(90)
 
           Write-Host ""
           Write-Host "==================================================" -ForegroundColor Green
@@ -43,7 +43,7 @@ jobs:
           Write-Host "==================================================" -ForegroundColor Green
           Write-Host "Bắt đầu : $($startTime.ToLocalTime().ToString('HH:mm:ss'))"
           Write-Host "Hết hạn : $($endTime.ToLocalTime().ToString('HH:mm:ss'))"
-          Write-Host "Thời gian: 60 phút"
+          Write-Host "Thời gian: 90 phút"
           Write-Host "==================================================" -ForegroundColor Green
           Write-Host ""
 
@@ -331,8 +331,8 @@ jobs:
             throw "VPS_START_TIME không hợp lệ."
           }
 
-          # Hết hạn đúng 60 phút từ lúc job bắt đầu
-          $endTime = $startTime.AddMinutes(60)
+          # Hết hạn đúng 90 phút từ lúc job bắt đầu
+          $endTime = $startTime.AddMinutes(90)
 
           $localStart = $startTime.ToLocalTime()
           $localEnd = $endTime.ToLocalTime()
@@ -353,29 +353,41 @@ jobs:
             # Thời gian còn lại
             $remaining = $endTime - $now
 
-            # Hết giờ
-            if ($remaining.TotalSeconds -le 0) {
-              break
+            # Tổng số giây còn lại
+            # Ceiling giúp mỗi mốc giây hiển thị ổn định.
+            $totalSeconds = [math]::Max(
+              0,
+              [math]::Ceiling($remaining.TotalSeconds)
+            )
+
+            # ----------------------------------------------------
+            # CLEAR MÀN HÌNH MỖI 1 GIÂY
+            # ----------------------------------------------------
+            # Mỗi vòng lặp clear đúng 1 lần rồi hiển thị thời gian mới.
+            try {
+              [Console]::Clear()
+            }
+            catch {
+              Clear-Host
             }
 
-            # Tổng số giây còn lại
-            $totalSeconds = [math]::Ceiling(
-              $remaining.TotalSeconds
-            )
-
-            # Tách phút / giây
-            $minutes = [math]::Floor(
-              $totalSeconds / 60
-            )
-
+            # Tách giờ / phút / giây
+            $hours = [math]::Floor($totalSeconds / 3600)
+            $minutes = [math]::Floor(($totalSeconds % 3600) / 60)
             $seconds = $totalSeconds % 60
 
-            # Hiển thị dạng 59:59
-            $countdown = "{0:00}:{1:00}" -f $minutes, $seconds
+            # Hiển thị dạng HH:MM:SS
+            $countdown = "{0:00}:{1:00}:{2:00}" -f `
+              $hours, $minutes, $seconds
 
             Write-Host `
               "[$(Get-Date -Format 'HH:mm:ss')] VPS đang chạy - Còn $countdown" `
               -ForegroundColor Cyan
+
+            # Khi đã về 0:00:00 thì giữ đúng màn hình 0 rồi thoát.
+            if ($totalSeconds -le 0) {
+              break
+            }
 
             # ----------------------------------------------------
             # KIỂM TRA TAILSCALE
@@ -410,26 +422,26 @@ jobs:
             # CẬP NHẬT SAU 1 GIÂY
             # ----------------------------------------------------
 
-            # Không ngủ quá thời gian còn lại
-            $sleepMilliseconds = [math]::Min(
-              1000,
-              [math]::Max(
-                100,
-                [int]$remaining.TotalMilliseconds
-              )
-            )
+            # ----------------------------------------------------
+            # CHỜ ĐÚNG TỚI TICK 1 GIÂY KẾ TIẾP
+            # ----------------------------------------------------
+            # Tính theo mốc thời gian thay vì sleep 1000ms đơn thuần,
+            # giúp bộ đếm không bị trôi dần theo thời gian xử lý.
+            $nextTick = $now.AddSeconds(1)
+            $waitMs = [int](($nextTick - (Get-Date).ToUniversalTime()).TotalMilliseconds)
 
-            Start-Sleep `
-              -Milliseconds $sleepMilliseconds
+            if ($waitMs -gt 0) {
+              Start-Sleep -Milliseconds $waitMs
+            }
           }
 
           # ======================================================
-          # HẾT 60 PHÚT
+          # HẾT 90 PHÚT
           # ======================================================
 
           Write-Host ""
           Write-Host "==================================================" -ForegroundColor Red
-          Write-Host "              ĐÃ HẾT 60 PHÚT" -ForegroundColor Red
+          Write-Host "              ĐÃ HẾT 90 PHÚT" -ForegroundColor Red
           Write-Host "           ĐANG KẾT THÚC WORKFLOW" -ForegroundColor Red
           Write-Host "==================================================" -ForegroundColor Red
           Write-Host ""
@@ -454,4 +466,5 @@ jobs:
           }
 
           exit 0
-          
+
+         
