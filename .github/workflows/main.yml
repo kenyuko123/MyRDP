@@ -344,95 +344,172 @@ jobs:
           # ------------------------------------------------------
           # BỘ ĐẾM MỖI 1 GIÂY
           # ------------------------------------------------------
+          #
+          # QUAN TRỌNG:
+          # GitHub Actions không có console tương tác thật như CMD/PowerShell
+          # trên máy local. Vì vậy Console.Clear() không thể xóa các dòng
+          # đã được GitHub lưu vào log.
+          #
+          # Cách xử lý dưới đây:
+          #   - Clear màn hình khi runner có console thật.
+          #   - Dùng CR + NoNewline để tái sử dụng cùng một dòng khi runner
+          #     hỗ trợ carriage-return.
+          #   - Tính countdown trực tiếp từ endTime nên không bị trôi.
+          #   - Mỗi giây chỉ cập nhật đúng một lần.
+          #   - Luôn hiển thị 00:00:00 trước khi thoát vòng lặp.
+          # ------------------------------------------------------
 
-          while ($true) {
+          $lastSecond = -1
+          $clearSupported = $false
 
-            # Thời gian hiện tại
-            $now = (Get-Date).ToUniversalTime()
-
-            # Thời gian còn lại
-            $remaining = $endTime - $now
-
-            # Tổng số giây còn lại
-            # Ceiling giúp mỗi mốc giây hiển thị ổn định.
-            $totalSeconds = [math]::Max(
-              0,
-              [math]::Ceiling($remaining.TotalSeconds)
-            )
-
-            # ----------------------------------------------------
-            # CLEAR MÀN HÌNH MỖI 1 GIÂY
-            # ----------------------------------------------------
-            # Mỗi vòng lặp clear đúng 1 lần rồi hiển thị thời gian mới.
-            try {
-              [Console]::Clear()
+          try {
+            if ($Host.UI -and $Host.UI.RawUI) {
+              $null = $Host.UI.RawUI.WindowTitle
+              $clearSupported = $true
             }
-            catch {
-              Clear-Host
-            }
+          }
+          catch {
+            $clearSupported = $false
+          }
 
-            # Tách giờ / phút / giây
-            $hours = [math]::Floor($totalSeconds / 3600)
-            $minutes = [math]::Floor(($totalSeconds % 3600) / 60)
-            $seconds = $totalSeconds % 60
+          # Kiểm tra Tailscale một lần trước khi bắt đầu timer.
+          # Giữ nguyên chức năng kiểm tra nhưng không để nó spam log.
+          try {
 
-            # Hiển thị dạng HH:MM:SS
-            $countdown = "{0:00}:{1:00}:{2:00}" -f `
-              $hours, $minutes, $seconds
+            $ts = Join-Path `
+              $env:ProgramFiles `
+              "Tailscale\tailscale.exe"
 
-            Write-Host `
-              "[$(Get-Date -Format 'HH:mm:ss')] VPS đang chạy - Còn $countdown" `
-              -ForegroundColor Cyan
-
-            # Khi đã về 0:00:00 thì giữ đúng màn hình 0 rồi thoát.
-            if ($totalSeconds -le 0) {
-              break
-            }
-
-            # ----------------------------------------------------
-            # KIỂM TRA TAILSCALE
-            # ----------------------------------------------------
-            #
-            # Đã sửa: không gọi tailscale.exe liên tục trong
-            # vòng lặp vì process con có thể làm Cancel chậm.
-            # ----------------------------------------------------
-
-            try {
-
-              $ts = Join-Path `
-                $env:ProgramFiles `
-                "Tailscale\tailscale.exe"
-
-              if (-not (Test-Path $ts)) {
-
-                Write-Host `
-                  "Cảnh báo: Không tìm thấy tailscale.exe." `
-                  -ForegroundColor Yellow
-              }
-
-            }
-            catch {
+            if (-not (Test-Path $ts)) {
 
               Write-Host `
-                "Không thể kiểm tra Tailscale." `
+                "Cảnh báo: Không tìm thấy tailscale.exe." `
                 -ForegroundColor Yellow
             }
 
-            # ----------------------------------------------------
-            # CẬP NHẬT SAU 1 GIÂY
-            # ----------------------------------------------------
+          }
+          catch {
 
-            # ----------------------------------------------------
-            # CHỜ ĐÚNG TỚI TICK 1 GIÂY KẾ TIẾP
-            # ----------------------------------------------------
-            # Tính theo mốc thời gian thay vì sleep 1000ms đơn thuần,
-            # giúp bộ đếm không bị trôi dần theo thời gian xử lý.
-            $nextTick = $now.AddSeconds(1)
-            $waitMs = [int](($nextTick - (Get-Date).ToUniversalTime()).TotalMilliseconds)
+            Write-Host `
+              "Không thể kiểm tra Tailscale." `
+              -ForegroundColor Yellow
+          }
 
-            if ($waitMs -gt 0) {
-              Start-Sleep -Milliseconds $waitMs
+          while ($true) {
+
+            # Lấy thời gian thực tại thời điểm render
+            $now = (Get-Date).ToUniversalTime()
+
+            # Tính trực tiếp từ endTime, không cộng/trừ theo số lần sleep
+            $remainingSeconds = ($endTime - $now).TotalSeconds
+
+            if ($remainingSeconds -le 0) {
+              $totalSeconds = 0
             }
+            else {
+              $totalSeconds = [int][math]::Ceiling($remainingSeconds)
+            }
+
+            # Không render lại cùng một giây
+            if ($totalSeconds -ne $lastSecond) {
+
+              $lastSecond = $totalSeconds
+
+              # --------------------------------------------------
+              # TÁCH GIỜ / PHÚT / GIÂY
+              # --------------------------------------------------
+
+              $hours = [int][math]::Floor($totalSeconds / 3600)
+              $minutes = [int][math]::Floor(
+                ($totalSeconds % 3600) / 60
+              )
+              $seconds = [int]($totalSeconds % 60)
+
+              $countdown = "{0:00}:{1:00}:{2:00}" -f `
+                $hours, `
+                $minutes, `
+                $seconds
+
+              # --------------------------------------------------
+              # CLEAR CONSOLE
+              # --------------------------------------------------
+              # Clear-Host/Console.Clear chỉ hoạt động thật trên
+              # console tương tác. GitHub log thì không thể xóa
+              # những dòng đã server lưu.
+              # --------------------------------------------------
+
+              if ($clearSupported) {
+                try {
+                  [Console]::Clear()
+                }
+                catch {
+                  try {
+                    Clear-Host
+                  }
+                  catch {
+                    # GitHub Actions không có console tương tác:
+                    # bỏ qua và dùng CR bên dưới.
+                  }
+                }
+              }
+
+              # --------------------------------------------------
+              # HIỂN THỊ
+              # --------------------------------------------------
+              #
+              # NoNewline + `r giúp tái sử dụng dòng hiện tại.
+              # Không Write-Host timestamp mới ở mỗi vòng nên không
+              # tự tạo thêm một dòng log cho mỗi giây.
+              # --------------------------------------------------
+
+              $line = "VPS đang chạy - Còn $countdown"
+
+              Write-Host -NoNewline ("`r" + (" " * 100) + "`r")
+              Write-Host -NoNewline $line
+
+              # --------------------------------------------------
+              # ĐÃ ĐẾN 00:00:00
+              # --------------------------------------------------
+
+              if ($totalSeconds -eq 0) {
+
+                # Kết thúc dòng hiện tại để phần "HẾT 90 PHÚT"
+                # phía dưới của source gốc hiển thị bình thường.
+                Write-Host ""
+
+                break
+              }
+            }
+
+            # --------------------------------------------------
+            # CANH ĐÚNG GIÂY KẾ TIẾP
+            # --------------------------------------------------
+            #
+            # Không sleep cứng 1000ms.
+            # Mỗi vòng lấy lại DateTime thực nên nếu runner bị lag
+            # thì timer vẫn tự bắt kịp, không bị cộng dồn sai số.
+            # --------------------------------------------------
+
+            $now = (Get-Date).ToUniversalTime()
+            $remainingMilliseconds = (
+              ($endTime - $now).TotalMilliseconds
+            )
+
+            if ($remainingMilliseconds -le 0) {
+              continue
+            }
+
+            # Sleep tối đa 100ms để có thể bắt đúng lúc chuyển giây,
+            # nhưng không render nhiều lần vì lastSecond chặn việc đó.
+            $sleepMilliseconds = [math]::Min(
+              100,
+              [math]::Max(
+                1,
+                [int][math]::Ceiling($remainingMilliseconds)
+              )
+            )
+
+            Start-Sleep -Milliseconds $sleepMilliseconds
           }
 
           # ======================================================
@@ -467,4 +544,4 @@ jobs:
 
           exit 0
 
-         
+          
