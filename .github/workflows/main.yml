@@ -263,12 +263,13 @@ jobs:
 
 
       # ==========================================================
-      # 4. KẾT NỐI ZEROTIER
+      # 4. KẾT NỐI ZEROTIER + TỰ ĐỘNG AUTHORIZE QUA CENTRAL API
       # ==========================================================
-      - name: 4. Kết nối RDP-của-Kenyuko qua ZeroTier
+      - name: 4. Kết nối RDP-của-Kenyuko qua ZeroTier - Auto Authorize
         shell: pwsh
         env:
           ZEROTIER_NETWORK_ID: ${{ secrets.ZEROTIER_NETWORK_ID }}
+          ZEROTIER_CENTRAL_TOKEN: ${{ secrets.ZEROTIER_CENTRAL_TOKEN }}
         run: |
           $ErrorActionPreference = "Stop"
 
@@ -278,18 +279,32 @@ jobs:
             throw "Secret ZEROTIER_NETWORK_ID chưa được cấu hình."
           }
 
+          if ($env:ZEROTIER_NETWORK_ID -notmatch '^[0-9a-fA-F]{16}$') {
+            throw "ZEROTIER_NETWORK_ID không hợp lệ. Network ID phải có 16 ký tự hex."
+          }
+
+          if ([string]::IsNullOrWhiteSpace($env:ZEROTIER_CENTRAL_TOKEN)) {
+            throw "Secret ZEROTIER_CENTRAL_TOKEN chưa được cấu hình."
+          }
+
           if (-not (Test-Path $env:ZT_EXE)) {
             throw "Không tìm thấy zerotier-cli: $env:ZT_EXE"
           }
 
           $zt = $env:ZT_EXE
+          $networkId = $env:ZEROTIER_NETWORK_ID
+          $apiBase = "https://api.zerotier.com/api/v1"
 
-          # Chờ service ZeroTier sẵn sàng.
+          # ------------------------------------------------------
+          # 4.1 Chờ ZeroTier service ONLINE
+          # ------------------------------------------------------
           $online = $false
           for ($i = 1; $i -le 30; $i++) {
             try {
-              $info = (& $zt info 2>$null | Out-String).Trim()
-              if ($info -match '\bONLINE\b') {
+              $infoOutput = (& $zt info 2>&1 | Out-String).Trim()
+              Write-Host $infoOutput
+
+              if ($infoOutput -match '\bONLINE\b') {
                 $online = $true
                 break
               }
@@ -304,26 +319,140 @@ jobs:
             throw "ZeroTier service chưa ONLINE sau 60 giây."
           }
 
-          # Join network; nếu đã join thì vẫn tiếp tục bình thường.
-          $joinOutput = (& $zt join $env:ZEROTIER_NETWORK_ID 2>&1 | Out-String).Trim()
+          # ------------------------------------------------------
+          # 4.2 Lấy Node ID của runner
+          # ------------------------------------------------------
+          $infoOutput = (& $zt info 2>&1 | Out-String).Trim()
+          $nodeId = $null
+
+          if ($infoOutput -match '^\s*200\s+info\s+([0-9a-fA-F]{10})\b') {
+            $nodeId = $Matches[1].ToLowerInvariant()
+          }
+          elseif ($infoOutput -match '\b([0-9a-fA-F]{10})\b') {
+            $nodeId = $Matches[1].ToLowerInvariant()
+          }
+
+          if ([string]::IsNullOrWhiteSpace($nodeId)) {
+            throw "Không lấy được Node ID từ zerotier-cli info. Output: $infoOutput"
+          }
+
+          Write-Host "Node ID: $nodeId" -ForegroundColor White
+
+          # ------------------------------------------------------
+          # 4.3 Join network
+          # ------------------------------------------------------
+          $joinOutput = (& $zt join $networkId 2>&1 | Out-String).Trim()
           Write-Host $joinOutput
 
           if ($LASTEXITCODE -ne 0 -and $joinOutput -notmatch 'already') {
             throw "zerotier-cli join thất bại. $joinOutput"
           }
 
-          # Chờ controller cấp IP.
+          Write-Host "[OK] Join ZeroTier thành công." -ForegroundColor Green
+
+          # ------------------------------------------------------
+          # 4.4 Tự động AUTHORIZE bằng Legacy Central API
+          # ------------------------------------------------------
+          # ZeroTier Legacy Central API dùng:
+          # Authorization: token <API_TOKEN>
+          # GET  /network/{networkID}/member
+          # POST /network/{networkID}/member/{memberID}
+          # với config.authorized = true.
+          # ------------------------------------------------------
+          $headers = @{
+            "Authorization" = "token $env:ZEROTIER_CENTRAL_TOKEN"
+            "Accept" = "application/json"
+          }
+
+          $member = $null
+          $memberFound = $false
+
+          for ($i = 1; $i -le 30; $i++) {
+            try {
+              $members = Invoke-RestMethod `
+                -Uri "$apiBase/network/$networkId/member" `
+                -Headers $headers `
+                -Method Get
+
+              $member = @($members) | Where-Object {
+                $_.nodeId -eq $nodeId -or $_.id -eq $nodeId
+              } | Select-Object -First 1
+
+              if ($member) {
+                $memberFound = $true
+                break
+              }
+            }
+            catch {
+              Write-Host "Central API chưa trả member, thử lại... $i/30" -ForegroundColor Yellow
+            }
+
+            Write-Host "Đang chờ Central nhận Node ID... $i/30"
+            Start-Sleep -Seconds 2
+          }
+
+          if (-not $memberFound) {
+            throw "ZeroTier Central chưa thấy Node ID $nodeId sau 60 giây. Kiểm tra Network ID và API token."
+          }
+
+          $memberAuthorized = $false
+          try {
+            if ($member.config -and $member.config.authorized -eq $true) {
+              $memberAuthorized = $true
+            }
+          }
+          catch {}
+
+          if (-not $memberAuthorized) {
+            Write-Host "Node chưa Authorized. Đang tự cấp quyền..." -ForegroundColor Cyan
+
+            $authBody = @{
+              config = @{
+                authorized = $true
+              }
+            } | ConvertTo-Json -Depth 5
+
+            try {
+              $null = Invoke-RestMethod `
+                -Uri "$apiBase/network/$networkId/member/$nodeId" `
+                -Headers $headers `
+                -Method Post `
+                -ContentType "application/json" `
+                -Body $authBody
+            }
+            catch {
+              throw "Central API không thể authorize Node $nodeId. HTTP/API error: $($_.Exception.Message)"
+            }
+
+            Write-Host "[OK] Đã tự động Authorized Node: $nodeId" -ForegroundColor Green
+          }
+          else {
+            Write-Host "[OK] Node đã Authorized từ trước: $nodeId" -ForegroundColor Green
+          }
+
+          # ------------------------------------------------------
+          # 4.5 Chờ ZeroTier cấp IP
+          # ------------------------------------------------------
           $ztIP = $null
+          $accessDeniedSeen = $false
 
           for ($i = 1; $i -le 45; $i++) {
             try {
-              $networks = (& $zt listnetworks 2>$null | Out-String).Trim()
+              $networks = (& $zt listnetworks 2>&1 | Out-String).Trim()
+
+              if ($networks -match 'ACCESS_DENIED') {
+                $accessDeniedSeen = $true
+              }
 
               if ($networks) {
                 $lines = $networks -split '\r?\n'
                 foreach ($line in $lines) {
-                  if ($line -match [regex]::Escape($env:ZEROTIER_NETWORK_ID)) {
-                    $matches = [regex]::Matches($line, '\b(?:10|172|192)\.\d{1,3}\.\d{1,3}\.\d{1,3}/\d{1,2}\b')
+                  if ($line -match [regex]::Escape($networkId)) {
+                    $matches = [regex]::Matches(
+                      $line,
+                      '\b(?:10|172|192)\.\d{1,3}\.\d{1,3}\.\d{1,3}/\d{1,2}\b'
+                    )
+
                     if ($matches.Count -gt 0) {
                       $ztIP = $matches[0].Value.Split('/')[0]
                       break
@@ -332,16 +461,24 @@ jobs:
                 }
               }
 
-              if ($ztIP) { break }
+              if ($ztIP) {
+                break
+              }
             }
             catch {}
 
-            Write-Host "Đang chờ IP ZeroTier... $i/45"
+            if ($accessDeniedSeen) {
+              Write-Host "Central đã authorize nhưng ZeroTier client chưa cập nhật quyền... $i/45" -ForegroundColor Yellow
+            }
+            else {
+              Write-Host "Đang chờ IP ZeroTier... $i/45"
+            }
+
             Start-Sleep -Seconds 2
           }
 
           if (-not $ztIP) {
-            throw "Không lấy được IP ZeroTier sau 90 giây. Hãy kiểm tra Authorize trong ZeroTier Central và Network ID."
+            throw "Không lấy được IP ZeroTier sau 90 giây. Node đã được API authorize nhưng client chưa nhận IP."
           }
 
           # Lưu IP cho step RDP/timer.
@@ -435,14 +572,10 @@ jobs:
           # Giữ nguyên chức năng kiểm tra nhưng không để nó spam log.
           try {
 
-            $ts = Join-Path `
-              $env:ProgramFiles `
-              "ZeroTier\zerotier.exe"
-
-            if (-not (Test-Path $ts)) {
+            if (-not (Test-Path $env:ZT_EXE)) {
 
               Write-Host `
-                "Cảnh báo: Không tìm thấy zerotier.exe." `
+                "Cảnh báo: Không tìm thấy zerotier-cli: $env:ZT_EXE" `
                 -ForegroundColor Yellow
             }
 
