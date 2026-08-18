@@ -1,9 +1,8 @@
-name: RDP_Cua_Kenyuko_Dep_Trai
+name: RDP_Cua_Kenyuko_ZeroTier_AutoAuth
 
 on:
   workflow_dispatch:
 
-# Chỉ cho phép 1 workflow thuộc nhóm này hoạt động tại một thời điểm.
 concurrency:
   group: kenyuko-rdp
   cancel-in-progress: true
@@ -11,261 +10,117 @@ concurrency:
 jobs:
   secure-rdp:
     runs-on: windows-latest
-
-    # Giới hạn tối đa của job.
-    # 91 phút để bộ đếm 90 phút tự kết thúc trước timeout GitHub.
     timeout-minutes: 91
 
     steps:
-
-      # ==========================================================
-      # 0. BẮT ĐẦU TÍNH GIỜ
-      # ==========================================================
       - name: 0. Bắt đầu tính thời gian VPS
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-
-          # Ghi thời điểm job bắt đầu
           $startTime = (Get-Date).ToUniversalTime()
-
-          "VPS_START_TIME=$($startTime.ToString('o'))" |
-            Out-File `
-              -FilePath $env:GITHUB_ENV `
-              -Append `
-              -Encoding utf8
-
+          "VPS_START_TIME=$($startTime.ToString('o'))" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
           $endTime = $startTime.AddMinutes(90)
-
-          Write-Host ""
           Write-Host "==================================================" -ForegroundColor Green
-          Write-Host "           VPS TIMER ĐÃ BẮT ĐẦU" -ForegroundColor Green
-          Write-Host "==================================================" -ForegroundColor Green
+          Write-Host "VPS TIMER ĐÃ BẮT ĐẦU" -ForegroundColor Green
           Write-Host "Bắt đầu : $($startTime.ToLocalTime().ToString('HH:mm:ss'))"
           Write-Host "Hết hạn : $($endTime.ToLocalTime().ToString('HH:mm:ss'))"
           Write-Host "Thời gian: 90 phút"
           Write-Host "==================================================" -ForegroundColor Green
-          Write-Host ""
 
-
-      # ==========================================================
-      # 1. CẤU HÌNH RDP + FIREWALL
-      # ==========================================================
-      - name: 1. Cấu hình Hệ thống & Tường lửa
+      - name: 1. Cấu hình RDP + Firewall
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-
           Write-Host "--- Kenyuko đẹp trai đang thiết lập hệ thống ---" -ForegroundColor Magenta
 
-          # Bật RDP
-          Set-ItemProperty `
-            -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-            -Name "fDenyTSConnections" `
-            -Value 0 `
-            -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name 'fDenyTSConnections' -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name 'UserAuthentication' -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name 'SecurityLayer' -Value 0 -Force
 
-          Set-ItemProperty `
-            -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-            -Name "UserAuthentication" `
-            -Value 0 `
-            -Force
+          netsh advfirewall firewall delete rule name="RDP-ZeroTier" > $null 2>&1
+          netsh advfirewall firewall add rule name="RDP-ZeroTier" dir=in action=allow protocol=TCP localport=3389
 
-          Set-ItemProperty `
-            -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-            -Name "SecurityLayer" `
-            -Value 0 `
-            -Force
-
-          # Xóa firewall rule cũ
-          netsh advfirewall firewall delete rule `
-            name="RDP-ZeroTier" `
-            > $null 2>&1
-
-          # Mở port RDP
-          netsh advfirewall firewall add rule `
-            name="RDP-ZeroTier" `
-            dir=in `
-            action=allow `
-            protocol=TCP `
-            localport=3389
-
-          # Khởi động RDP
-          Restart-Service `
-            -Name TermService `
-            -Force
-
-          # Kiểm tra dịch vụ
-          $rdpService = Get-Service -Name TermService
-
-          if ($rdpService.Status -ne "Running") {
-            throw "TermService chưa chạy."
+          Restart-Service -Name TermService -Force
+          if ((Get-Service -Name TermService).Status -ne 'Running') {
+            throw 'TermService chưa chạy.'
           }
+          Write-Host '[XONG] RDP và Firewall đã sẵn sàng.' -ForegroundColor Green
 
-          Write-Host "[XONG] RDP và Firewall đã sẵn sàng." -ForegroundColor Green
-
-
-      # ==========================================================
-      # 2. TẠO USER + PASSWORD
-      # ==========================================================
-      - name: 2. Tạo Mật khẩu Ngẫu nhiên & User Kenyuko
+      - name: 2. Tạo user Kenyuko + mật khẩu
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-
-          Write-Host "--- Đang tạo mật khẩu ngẫu nhiên ---" -ForegroundColor Cyan
 
           $upper = [char[]](65..90)
           $lower = [char[]](97..122)
           $number = [char[]](48..57)
-          $special = [char[]]"!@#$%_-+="
-
+          $special = [char[]]'!@#$%_-+='
           $rawPassword = @()
-
           $rawPassword += $upper | Get-Random -Count 4
           $rawPassword += $lower | Get-Random -Count 4
           $rawPassword += $number | Get-Random -Count 4
           $rawPassword += $special | Get-Random -Count 4
+          $password = -join ($rawPassword | Sort-Object { Get-Random })
 
-          # Trộn password
-          $password = -join (
-            $rawPassword |
-            Sort-Object { Get-Random }
-          )
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          $oldUser = Get-LocalUser -Name 'Kenyuko' -ErrorAction SilentlyContinue
+          if ($oldUser) { Remove-LocalUser -Name 'Kenyuko' -ErrorAction Stop }
 
-          $securePass = ConvertTo-SecureString `
-            -String $password `
-            -AsPlainText `
-            -Force
+          New-LocalUser -Name 'Kenyuko' -Password $securePass -AccountNeverExpires -Description 'RDP cua Kenyuko' | Out-Null
+          Add-LocalGroupMember -Group 'Administrators' -Member 'Kenyuko'
+          Add-LocalGroupMember -Group 'Remote Desktop Users' -Member 'Kenyuko'
 
-          # Xóa user cũ nếu tồn tại
-          $oldUser = Get-LocalUser `
-            -Name "Kenyuko" `
-            -ErrorAction SilentlyContinue
+          "RDP_PASS=$password" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host '[THÀNH CÔNG] Đã tạo user Kenyuko.' -ForegroundColor Green
 
-          if ($oldUser) {
-            Remove-LocalUser `
-              -Name "Kenyuko" `
-              -ErrorAction Stop
-          }
-
-          # Tạo user mới
-          New-LocalUser `
-            -Name "Kenyuko" `
-            -Password $securePass `
-            -AccountNeverExpires `
-            -Description "RDP cua Kenyuko" |
-            Out-Null
-
-          # Thêm Administrators
-          Add-LocalGroupMember `
-            -Group "Administrators" `
-            -Member "Kenyuko"
-
-          # Thêm Remote Desktop Users
-          Add-LocalGroupMember `
-            -Group "Remote Desktop Users" `
-            -Member "Kenyuko"
-
-          # Lưu password cho các step sau
-          "RDP_PASS=$password" |
-            Out-File `
-              -FilePath $env:GITHUB_ENV `
-              -Append `
-              -Encoding utf8
-
-          Write-Host "[THÀNH CÔNG] Đã tạo user Kenyuko." -ForegroundColor Green
-
-
-      # ==========================================================
-      # 3. CÀI ZEROTIER - TỰ CHỌN BẢN THEO WINDOWS
-      # ==========================================================
       - name: 3. Cài đặt ZeroTier tương thích Windows
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-
-          Write-Host "--- Đang xác định phiên bản Windows ---" -ForegroundColor Cyan
-
           $osVersion = [Environment]::OSVersion.Version
           $arch = $env:PROCESSOR_ARCHITECTURE
 
-          # ZeroTier đã bỏ hỗ trợ Windows 7 ở các bản mới.
-          # Win7  -> 1.4.6 (legacy, bản cuối phù hợp Win7)
-          # Win8/8.1 -> 1.6.5 (legacy)
-          # Win10/11 -> 1.16.2 (bản hiện tại)
           if ($osVersion.Major -eq 6 -and $osVersion.Minor -eq 1) {
-            $ztVersion = "1.4.6"
+            $ztVersion = '1.4.6'
           }
           elseif ($osVersion.Major -eq 6 -and ($osVersion.Minor -eq 2 -or $osVersion.Minor -eq 3)) {
-            $ztVersion = "1.6.5"
+            $ztVersion = '1.6.5'
           }
           elseif ($osVersion.Major -ge 10) {
-            $ztVersion = "1.16.2"
+            $ztVersion = '1.16.2'
           }
           else {
-            throw "Windows này không nằm trong nhóm phiên bản được hỗ trợ: $osVersion"
+            throw "Windows không nằm trong nhóm hỗ trợ: $osVersion"
           }
 
-          Write-Host "Windows : $osVersion" -ForegroundColor White
-          Write-Host "Arch    : $arch" -ForegroundColor White
+          Write-Host "Windows : $osVersion"
+          Write-Host "Arch    : $arch"
           Write-Host "ZeroTier: $ztVersion" -ForegroundColor Green
 
+          $msiPath = Join-Path $env:TEMP 'ZeroTierOne.msi'
           $ztUrl = "https://download.zerotier.com/RELEASES/$ztVersion/dist/ZeroTierOne.msi"
-          $msiPath = Join-Path $env:TEMP "ZeroTierOne.msi"
+          Invoke-WebRequest -Uri $ztUrl -OutFile $msiPath -UseBasicParsing
 
-          Write-Host "Đang tải: $ztUrl" -ForegroundColor Cyan
+          if (-not (Test-Path $msiPath)) { throw 'Không tải được ZeroTier MSI.' }
 
-          Invoke-WebRequest `
-            -Uri $ztUrl `
-            -OutFile $msiPath `
-            -UseBasicParsing
-
-          if (-not (Test-Path $msiPath)) {
-            throw "Không tải được ZeroTier MSI."
-          }
-
-          $installer = Start-Process `
-            -FilePath "msiexec.exe" `
-            -ArgumentList "/i `"$msiPath`" /qn /norestart" `
-            -Wait `
-            -PassThru
-
-          if ($installer.ExitCode -notin @(0, 3010)) {
+          $installer = Start-Process msiexec.exe -ArgumentList "/i `"$msiPath`" /qn /norestart" -Wait -PassThru
+          if ($installer.ExitCode -notin @(0,3010)) {
             throw "Cài ZeroTier thất bại. ExitCode: $($installer.ExitCode)"
           }
 
-          $ztExe = Join-Path $env:ProgramFiles "ZeroTier\One\zerotier-cli.bat"
+          $candidates = @(
+            (Join-Path $env:ProgramFiles 'ZeroTier\One\zerotier-cli.bat'),
+            (Join-Path ${env:ProgramFiles(x86)} 'ZeroTier\One\zerotier-cli.bat'),
+            (Join-Path $env:ProgramFiles 'ZeroTier\One\zerotier-cli.exe'),
+            (Join-Path ${env:ProgramFiles(x86)} 'ZeroTier\One\zerotier-cli.exe')
+          )
+          $ztExe = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $ztExe) { throw 'Không tìm thấy zerotier-cli sau khi cài.' }
 
-          if (-not (Test-Path $ztExe)) {
-            $ztExe = Join-Path ${env:ProgramFiles(x86)} "ZeroTier\One\zerotier-cli.bat"
-          }
-
-          if (-not (Test-Path $ztExe)) {
-            $ztExe = Join-Path $env:ProgramFiles "ZeroTier\One\zerotier-cli.exe"
-          }
-
-          if (-not (Test-Path $ztExe)) {
-            $ztExe = Join-Path ${env:ProgramFiles(x86)} "ZeroTier\One\zerotier-cli.exe"
-          }
-
-          if (-not (Test-Path $ztExe)) {
-            throw "Không tìm thấy zerotier-cli sau khi cài."
-          }
-
-          "ZT_EXE=$ztExe" |
-            Out-File `
-              -FilePath $env:GITHUB_ENV `
-              -Append `
-              -Encoding utf8
-
+          "ZT_EXE=$ztExe" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
           Write-Host "[XONG] ZeroTier $ztVersion đã được cài đặt." -ForegroundColor Green
 
-
-      # ==========================================================
-      # 4. KẾT NỐI ZEROTIER + TỰ ĐỘNG AUTHORIZE QUA CENTRAL API
-      # ==========================================================
-      - name: 4. Kết nối RDP-của-Kenyuko qua ZeroTier - Auto Authorize
+      - name: 4. Join ZeroTier + Auto Authorize
         shell: pwsh
         env:
           ZEROTIER_NETWORK_ID: ${{ secrets.ZEROTIER_NETWORK_ID }}
@@ -273,461 +128,192 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
 
-          Write-Host "--- Đang kết nối ZeroTier ---" -ForegroundColor Cyan
-
           if ([string]::IsNullOrWhiteSpace($env:ZEROTIER_NETWORK_ID)) {
-            throw "Secret ZEROTIER_NETWORK_ID chưa được cấu hình."
+            throw 'Secret ZEROTIER_NETWORK_ID chưa được cấu hình.'
           }
-
           if ($env:ZEROTIER_NETWORK_ID -notmatch '^[0-9a-fA-F]{16}$') {
-            throw "ZEROTIER_NETWORK_ID không hợp lệ. Network ID phải có 16 ký tự hex."
+            throw 'ZEROTIER_NETWORK_ID phải có đúng 16 ký tự hex.'
           }
-
           if ([string]::IsNullOrWhiteSpace($env:ZEROTIER_CENTRAL_TOKEN)) {
-            throw "Secret ZEROTIER_CENTRAL_TOKEN chưa được cấu hình."
+            throw 'Secret ZEROTIER_CENTRAL_TOKEN chưa được cấu hình.'
           }
-
           if (-not (Test-Path $env:ZT_EXE)) {
             throw "Không tìm thấy zerotier-cli: $env:ZT_EXE"
           }
 
           $zt = $env:ZT_EXE
-          $networkId = $env:ZEROTIER_NETWORK_ID
-          $apiBase = "https://api.zerotier.com/api/v1"
+          $networkId = $env:ZEROTIER_NETWORK_ID.ToLowerInvariant()
+          $apiBase = 'https://api.zerotier.com/api/v1'
+          $headers = @{
+            Authorization = "token $env:ZEROTIER_CENTRAL_TOKEN"
+            Accept = 'application/json'
+          }
 
-          # ------------------------------------------------------
-          # 4.1 Chờ ZeroTier service ONLINE
-          # ------------------------------------------------------
+          # Chờ service ONLINE.
           $online = $false
           for ($i = 1; $i -le 30; $i++) {
-            try {
-              $infoOutput = (& $zt info 2>&1 | Out-String).Trim()
-              Write-Host $infoOutput
-
-              if ($infoOutput -match '\bONLINE\b') {
-                $online = $true
-                break
-              }
-            }
-            catch {}
-
+            $info = (& $zt info 2>&1 | Out-String).Trim()
+            Write-Host $info
+            if ($info -match '\bONLINE\b') { $online = $true; break }
             Write-Host "Đang chờ ZeroTier service... $i/30"
-            Start-Sleep -Seconds 2
+            Start-Sleep 2
           }
+          if (-not $online) { throw 'ZeroTier service chưa ONLINE sau 60 giây.' }
 
-          if (-not $online) {
-            throw "ZeroTier service chưa ONLINE sau 60 giây."
-          }
-
-          # ------------------------------------------------------
-          # 4.2 Lấy Node ID của runner
-          # ------------------------------------------------------
-          $infoOutput = (& $zt info 2>&1 | Out-String).Trim()
+          # Node ID.
+          $info = (& $zt info 2>&1 | Out-String).Trim()
           $nodeId = $null
-
-          if ($infoOutput -match '^\s*200\s+info\s+([0-9a-fA-F]{10})\b') {
-            $nodeId = $Matches[1].ToLowerInvariant()
-          }
-          elseif ($infoOutput -match '\b([0-9a-fA-F]{10})\b') {
-            $nodeId = $Matches[1].ToLowerInvariant()
-          }
-
-          if ([string]::IsNullOrWhiteSpace($nodeId)) {
-            throw "Không lấy được Node ID từ zerotier-cli info. Output: $infoOutput"
-          }
-
+          if ($info -match '^\s*200\s+info\s+([0-9a-fA-F]{10})\b') { $nodeId = $Matches[1].ToLowerInvariant() }
+          elseif ($info -match '\b([0-9a-fA-F]{10})\b') { $nodeId = $Matches[1].ToLowerInvariant() }
+          if (-not $nodeId) { throw "Không lấy được Node ID. Output: $info" }
           Write-Host "Node ID: $nodeId" -ForegroundColor White
 
-          # ------------------------------------------------------
-          # 4.3 Join network
-          # ------------------------------------------------------
-          $joinOutput = (& $zt join $networkId 2>&1 | Out-String).Trim()
-          Write-Host $joinOutput
+          # Join.
+          $join = (& $zt join $networkId 2>&1 | Out-String).Trim()
+          Write-Host $join
+          if ($LASTEXITCODE -ne 0 -and $join -notmatch 'already') {
+            throw "zerotier-cli join thất bại: $join"
+          }
+          Write-Host '[OK] Join ZeroTier thành công.' -ForegroundColor Green
 
-          if ($LASTEXITCODE -ne 0 -and $joinOutput -notmatch 'already') {
-            throw "zerotier-cli join thất bại. $joinOutput"
+          # Kiểm tra network bằng API trước khi authorize.
+          try {
+            $networkResponse = Invoke-WebRequest -Uri "$apiBase/network/$networkId" -Headers $headers -Method Get -UseBasicParsing -ErrorAction Stop
+            Write-Host "Central API GET network: HTTP $($networkResponse.StatusCode)" -ForegroundColor Green
+            try {
+              $network = $networkResponse.Content | ConvertFrom-Json
+              Write-Host "Network : $($network.config.name)"
+              Write-Host "Members : $($network.totalMemberCount)"
+            } catch {}
+          }
+          catch {
+            $status = $null
+            try { $status = [int]$_.Exception.Response.StatusCode } catch {}
+            if ($status) {
+              throw "Central API GET network thất bại: HTTP $status. Nếu network của bạn nằm trên New Central, token phải là Service Account API key dùng Bearer; token Legacy không đủ cho New Central API."
+            }
+            throw "Không kết nối được ZeroTier Central API: $($_.Exception.Message)"
           }
 
-          Write-Host "[OK] Join ZeroTier thành công." -ForegroundColor Green
-
-          # ------------------------------------------------------
-          # 4.4 Tự động AUTHORIZE bằng Legacy Central API
-          # ------------------------------------------------------
-          # ZeroTier Legacy Central API dùng:
-          # Authorization: token <API_TOKEN>
-          # GET  /network/{networkID}/member
-          # POST /network/{networkID}/member/{memberID}
-          # với config.authorized = true.
-          # ------------------------------------------------------
-          $headers = @{
-            "Authorization" = "token $env:ZEROTIER_CENTRAL_TOKEN"
-            "Accept" = "application/json"
-          }
-
-          $member = $null
-          $memberFound = $false
+          # Không dò cả danh sách member nữa. POST thẳng vào Node ID vừa lấy.
+          $body = @{ config = @{ authorized = $true } } | ConvertTo-Json -Compress
+          $authorized = $false
 
           for ($i = 1; $i -le 30; $i++) {
             try {
-              $members = Invoke-RestMethod `
-                -Uri "$apiBase/network/$networkId/member" `
-                -Headers $headers `
-                -Method Get
-
-              $member = @($members) | Where-Object {
-                $_.nodeId -eq $nodeId -or $_.id -eq $nodeId
-              } | Select-Object -First 1
-
-              if ($member) {
-                $memberFound = $true
-                break
-              }
-            }
-            catch {
-              Write-Host "Central API chưa trả member, thử lại... $i/30" -ForegroundColor Yellow
-            }
-
-            Write-Host "Đang chờ Central nhận Node ID... $i/30"
-            Start-Sleep -Seconds 2
-          }
-
-          if (-not $memberFound) {
-            throw "ZeroTier Central chưa thấy Node ID $nodeId sau 60 giây. Kiểm tra Network ID và API token."
-          }
-
-          $memberAuthorized = $false
-          try {
-            if ($member.config -and $member.config.authorized -eq $true) {
-              $memberAuthorized = $true
-            }
-          }
-          catch {}
-
-          if (-not $memberAuthorized) {
-            Write-Host "Node chưa Authorized. Đang tự cấp quyền..." -ForegroundColor Cyan
-
-            $authBody = @{
-              config = @{
-                authorized = $true
-              }
-            } | ConvertTo-Json -Depth 5
-
-            try {
-              $null = Invoke-RestMethod `
+              $r = Invoke-WebRequest `
                 -Uri "$apiBase/network/$networkId/member/$nodeId" `
                 -Headers $headers `
                 -Method Post `
-                -ContentType "application/json" `
-                -Body $authBody
+                -Body $body `
+                -ContentType 'application/json' `
+                -UseBasicParsing `
+                -ErrorAction Stop
+              Write-Host "Central API AUTHORIZE: HTTP $($r.StatusCode)" -ForegroundColor Green
+              $authorized = $true
+              break
             }
             catch {
-              throw "Central API không thể authorize Node $nodeId. HTTP/API error: $($_.Exception.Message)"
+              $status = $null
+              try { $status = [int]$_.Exception.Response.StatusCode } catch {}
+              if ($status) { Write-Host "Authorize Node $nodeId: HTTP $status - thử lại $i/30" -ForegroundColor Yellow }
+              else { Write-Host "Authorize chưa thành công - thử lại $i/30: $($_.Exception.Message)" -ForegroundColor Yellow }
             }
-
-            Write-Host "[OK] Đã tự động Authorized Node: $nodeId" -ForegroundColor Green
+            Start-Sleep 2
           }
-          else {
-            Write-Host "[OK] Node đã Authorized từ trước: $nodeId" -ForegroundColor Green
+          if (-not $authorized) {
+            throw "Không thể authorize Node $nodeId sau 60 giây."
           }
+          Write-Host "[OK] Đã tự động Authorized Node: $nodeId" -ForegroundColor Green
 
-          # ------------------------------------------------------
-          # 4.5 Chờ ZeroTier cấp IP
-          # ------------------------------------------------------
-          $ztIP = $null
-          $accessDeniedSeen = $false
-
-          for ($i = 1; $i -le 45; $i++) {
+          # Xác nhận Central.
+          $confirmed = $false
+          for ($i = 1; $i -le 30; $i++) {
             try {
-              $networks = (& $zt listnetworks 2>&1 | Out-String).Trim()
-
-              if ($networks -match 'ACCESS_DENIED') {
-                $accessDeniedSeen = $true
-              }
-
-              if ($networks) {
-                $lines = $networks -split '\r?\n'
-                foreach ($line in $lines) {
-                  if ($line -match [regex]::Escape($networkId)) {
-                    $matches = [regex]::Matches(
-                      $line,
-                      '\b(?:10|172|192)\.\d{1,3}\.\d{1,3}\.\d{1,3}/\d{1,2}\b'
-                    )
-
-                    if ($matches.Count -gt 0) {
-                      $ztIP = $matches[0].Value.Split('/')[0]
-                      break
-                    }
-                  }
-                }
-              }
-
-              if ($ztIP) {
+              $m = Invoke-RestMethod -Uri "$apiBase/network/$networkId/member/$nodeId" -Headers $headers -Method Get
+              if ($m.config.authorized -eq $true) {
+                $confirmed = $true
+                Write-Host '[OK] Central xác nhận Authorized.' -ForegroundColor Green
                 break
               }
             }
             catch {}
-
-            if ($accessDeniedSeen) {
-              Write-Host "Central đã authorize nhưng ZeroTier client chưa cập nhật quyền... $i/45" -ForegroundColor Yellow
-            }
-            else {
-              Write-Host "Đang chờ IP ZeroTier... $i/45"
-            }
-
-            Start-Sleep -Seconds 2
+            Write-Host "Đang chờ Central xác nhận Authorized... $i/30" -ForegroundColor Yellow
+            Start-Sleep 2
           }
+          if (-not $confirmed) { throw "Central chưa xác nhận Node $nodeId Authorized sau 60 giây." }
 
-          if (-not $ztIP) {
-            throw "Không lấy được IP ZeroTier sau 90 giây. Node đã được API authorize nhưng client chưa nhận IP."
+          # Chờ client nhận quyền và IP.
+          $ztIP = $null
+          for ($i = 1; $i -le 60; $i++) {
+            $networks = (& $zt listnetworks 2>&1 | Out-String).Trim()
+            if ($networks -match 'ACCESS_DENIED') {
+              Write-Host "Client chưa cập nhật quyền... $i/60" -ForegroundColor Yellow
+            }
+            foreach ($line in ($networks -split '\r?\n')) {
+              if ($line -match [regex]::Escape($networkId)) {
+                $ip = [regex]::Match($line, '\b(?:10|172|192)\.\d{1,3}\.\d{1,3}\.\d{1,3}/\d{1,2}\b')
+                if ($ip.Success) { $ztIP = $ip.Value.Split('/')[0]; break }
+              }
+            }
+            if ($ztIP) { break }
+            Write-Host "Đang chờ IP ZeroTier... $i/60"
+            Start-Sleep 2
           }
+          if (-not $ztIP) { throw 'Không lấy được IP ZeroTier sau 120 giây.' }
 
-          # Lưu IP cho step RDP/timer.
-          "ZT_IP=$ztIP" |
-            Out-File `
-              -FilePath $env:GITHUB_ENV `
-              -Append `
-              -Encoding utf8
-
+          "ZT_IP=$ztIP" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "ZT_NODE_ID=$nodeId" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
           Write-Host "[XONG] IP ZeroTier: $ztIP" -ForegroundColor Green
 
-
-      # ==========================================================
-      # 5. DUY TRÌ RDP + BỘ ĐẾM MỖI 1 GIÂY
-      # ==========================================================
-      - name: 5. Duy trì Kết nối - Tự động tắt sau 90 phút
+      - name: 5. Duy trì RDP - tự động tắt sau 90 phút
         shell: pwsh
         run: |
-          $ErrorActionPreference = "Continue"
+          $ErrorActionPreference = 'Continue'
+          Write-Host '==================================================' -ForegroundColor Yellow
+          Write-Host 'THÔNG TIN RDP CỦA KENYUKO' -ForegroundColor Yellow
+          Write-Host '==================================================' -ForegroundColor Yellow
+          Write-Host "IP       : $env:ZT_IP"
+          Write-Host 'Username : Kenyuko'
+          Write-Host "Password : $env:RDP_PASS"
+          Write-Host 'Port     : 3389'
+          Write-Host '==================================================' -ForegroundColor Yellow
 
-          Write-Host ""
-          Write-Host "==================================================" -ForegroundColor Yellow
-          Write-Host "       THÔNG TIN RDP CỦA KENYUKO" -ForegroundColor Yellow
-          Write-Host "==================================================" -ForegroundColor Yellow
-          Write-Host "IP ZeroTier: $env:ZT_IP" -ForegroundColor White
-          Write-Host "Username : Kenyuko" -ForegroundColor White
-          Write-Host "Password : $env:RDP_PASS" -ForegroundColor White
-          Write-Host "Port     : 3389" -ForegroundColor White
-          Write-Host "==================================================" -ForegroundColor Yellow
-          Write-Host ""
-
-          # ------------------------------------------------------
-          # LẤY THỜI ĐIỂM JOB BẮT ĐẦU
-          # ------------------------------------------------------
-
-          if ([string]::IsNullOrWhiteSpace($env:VPS_START_TIME)) {
-            throw "Không tìm thấy VPS_START_TIME."
-          }
-
-          try {
-            $startTime = [DateTime]::Parse(
-              $env:VPS_START_TIME
-            ).ToUniversalTime()
-          }
-          catch {
-            throw "VPS_START_TIME không hợp lệ."
-          }
-
-          # Hết hạn đúng 90 phút từ lúc job bắt đầu
+          $startTime = [DateTime]::Parse($env:VPS_START_TIME).ToUniversalTime()
           $endTime = $startTime.AddMinutes(90)
-
-          $localStart = $startTime.ToLocalTime()
-          $localEnd = $endTime.ToLocalTime()
-
-          Write-Host "VPS bắt đầu : $($localStart.ToString('HH:mm:ss'))" -ForegroundColor Cyan
-          Write-Host "VPS kết thúc: $($localEnd.ToString('HH:mm:ss'))" -ForegroundColor Red
-          Write-Host ""
-
-          # ------------------------------------------------------
-          # BỘ ĐẾM MỖI 1 GIÂY
-          # ------------------------------------------------------
-          #
-          # QUAN TRỌNG:
-          # GitHub Actions không có console tương tác thật như CMD/PowerShell
-          # trên máy local. Vì vậy Console.Clear() không thể xóa các dòng
-          # đã được GitHub lưu vào log.
-          #
-          # Cách xử lý dưới đây:
-          #   - Clear màn hình khi runner có console thật.
-          #   - Dùng CR + NoNewline để tái sử dụng cùng một dòng khi runner
-          #     hỗ trợ carriage-return.
-          #   - Tính countdown trực tiếp từ endTime nên không bị trôi.
-          #   - Mỗi giây chỉ cập nhật đúng một lần.
-          #   - Luôn hiển thị 00:00:00 trước khi thoát vòng lặp.
-          # ------------------------------------------------------
-
           $lastSecond = -1
-          $clearSupported = $false
-
-          try {
-            if ($Host.UI -and $Host.UI.RawUI) {
-              $null = $Host.UI.RawUI.WindowTitle
-              $clearSupported = $true
-            }
-          }
-          catch {
-            $clearSupported = $false
-          }
-
-          # Kiểm tra ZeroTier một lần trước khi bắt đầu timer.
-          # Giữ nguyên chức năng kiểm tra nhưng không để nó spam log.
-          try {
-
-            if (-not (Test-Path $env:ZT_EXE)) {
-
-              Write-Host `
-                "Cảnh báo: Không tìm thấy zerotier-cli: $env:ZT_EXE" `
-                -ForegroundColor Yellow
-            }
-
-          }
-          catch {
-
-            Write-Host `
-              "Không thể kiểm tra ZeroTier." `
-              -ForegroundColor Yellow
-          }
 
           while ($true) {
+            $remaining = ($endTime - (Get-Date).ToUniversalTime()).TotalSeconds
+            $totalSeconds = if ($remaining -le 0) { 0 } else { [int][math]::Ceiling($remaining) }
 
-            # Lấy thời gian thực tại thời điểm render
-            $now = (Get-Date).ToUniversalTime()
-
-            # Tính trực tiếp từ endTime, không cộng/trừ theo số lần sleep
-            $remainingSeconds = ($endTime - $now).TotalSeconds
-
-            if ($remainingSeconds -le 0) {
-              $totalSeconds = 0
-            }
-            else {
-              $totalSeconds = [int][math]::Ceiling($remainingSeconds)
-            }
-
-            # Không render lại cùng một giây
             if ($totalSeconds -ne $lastSecond) {
-
               $lastSecond = $totalSeconds
-
-              # --------------------------------------------------
-              # TÁCH GIỜ / PHÚT / GIÂY
-              # --------------------------------------------------
-
               $hours = [int][math]::Floor($totalSeconds / 3600)
-              $minutes = [int][math]::Floor(
-                ($totalSeconds % 3600) / 60
-              )
+              $minutes = [int][math]::Floor(($totalSeconds % 3600) / 60)
               $seconds = [int]($totalSeconds % 60)
-
-              $countdown = "{0:00}:{1:00}:{2:00}" -f `
-                $hours, `
-                $minutes, `
-                $seconds
-
-              # --------------------------------------------------
-              # CLEAR CONSOLE
-              # --------------------------------------------------
-              # Clear-Host/Console.Clear chỉ hoạt động thật trên
-              # console tương tác. GitHub log thì không thể xóa
-              # những dòng đã server lưu.
-              # --------------------------------------------------
-
-              if ($clearSupported) {
-                try {
-                  [Console]::Clear()
-                }
-                catch {
-                  try {
-                    Clear-Host
-                  }
-                  catch {
-                    # GitHub Actions không có console tương tác:
-                    # bỏ qua và dùng CR bên dưới.
-                  }
-                }
-              }
-
-              # --------------------------------------------------
-              # HIỂN THỊ
-              # --------------------------------------------------
-              #
-              # NoNewline + `r giúp tái sử dụng dòng hiện tại.
-              # Không Write-Host timestamp mới ở mỗi vòng nên không
-              # tự tạo thêm một dòng log cho mỗi giây.
-              # --------------------------------------------------
-
-              $line = "VPS đang chạy - Còn $countdown"
-
-              Write-Host -NoNewline ("`r" + (" " * 100) + "`r")
-              Write-Host -NoNewline $line
-
-              # --------------------------------------------------
-              # ĐÃ ĐẾN 00:00:00
-              # --------------------------------------------------
-
-              if ($totalSeconds -eq 0) {
-
-                # Kết thúc dòng hiện tại để phần "HẾT 90 PHÚT"
-                # phía dưới của source gốc hiển thị bình thường.
-                Write-Host ""
-
-                break
-              }
+              $countdown = '{0:00}:{1:00}:{2:00}' -f $hours,$minutes,$seconds
+              Write-Host -NoNewline ("`r" + (' ' * 80) + "`r")
+              Write-Host -NoNewline "VPS đang chạy - Còn $countdown"
+              if ($totalSeconds -eq 0) { Write-Host ''; break }
             }
-
-            # --------------------------------------------------
-            # CANH ĐÚNG GIÂY KẾ TIẾP
-            # --------------------------------------------------
-            #
-            # Không sleep cứng 1000ms.
-            # Mỗi vòng lấy lại DateTime thực nên nếu runner bị lag
-            # thì timer vẫn tự bắt kịp, không bị cộng dồn sai số.
-            # --------------------------------------------------
-
-            $now = (Get-Date).ToUniversalTime()
-            $remainingMilliseconds = (
-              ($endTime - $now).TotalMilliseconds
-            )
-
-            if ($remainingMilliseconds -le 0) {
-              continue
-            }
-
-            # Sleep tối đa 100ms để có thể bắt đúng lúc chuyển giây,
-            # nhưng không render nhiều lần vì lastSecond chặn việc đó.
-            $sleepMilliseconds = [math]::Min(
-              100,
-              [math]::Max(
-                1,
-                [int][math]::Ceiling($remainingMilliseconds)
-              )
-            )
-
-            Start-Sleep -Milliseconds $sleepMilliseconds
+            Start-Sleep -Milliseconds 200
           }
 
-          # ======================================================
-          # HẾT 90 PHÚT
-          # ======================================================
+          Write-Host ''
+          Write-Host '==================================================' -ForegroundColor Red
+          Write-Host 'ĐÃ HẾT 90 PHÚT - ĐANG KẾT THÚC WORKFLOW' -ForegroundColor Red
+          Write-Host '==================================================' -ForegroundColor Red
 
-          Write-Host ""
-          Write-Host "==================================================" -ForegroundColor Red
-          Write-Host "              ĐÃ HẾT 90 PHÚT" -ForegroundColor Red
-          Write-Host "           ĐANG KẾT THÚC WORKFLOW" -ForegroundColor Red
-          Write-Host "==================================================" -ForegroundColor Red
-          Write-Host ""
-
-          # Rời mạng ZeroTier
-          try {
-
-            if (Test-Path $env:ZT_EXE) {
-              & $env:ZT_EXE leave $env:ZEROTIER_NETWORK_ID 2>$null
-            }
-
+      - name: 6. Cleanup ZeroTier
+        if: always()
+        shell: pwsh
+        env:
+          ZEROTIER_NETWORK_ID: ${{ secrets.ZEROTIER_NETWORK_ID }}
+          ZEROTIER_CENTRAL_TOKEN: ${{ secrets.ZEROTIER_CENTRAL_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Continue'
+          if ($env:ZT_EXE -and (Test-Path $env:ZT_EXE) -and $env:ZEROTIER_NETWORK_ID) {
+            & $env:ZT_EXE leave $env:ZEROTIER_NETWORK_ID 2>$null
           }
-          catch {
-
-            Write-Host `
-              "Không thể rời mạng ZeroTier, tiếp tục kết thúc." `
-              -ForegroundColor Yellow
-          }
-
-          exit 0
+          Write-Host '[CLEANUP] Đã yêu cầu ZeroTier rời network.' -ForegroundColor DarkGray
